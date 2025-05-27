@@ -104,8 +104,7 @@ A: 請確保已安裝所有必要套件，並使用兼容的Python版本。
 ## 技術支援
 
 如有任何問題或建議，請聯繫技術支援：
-- 電子郵件：support@wordpdfconverter.com
-- 網站：www.wordpdfconverter.com/support
+- 電子郵件：moredof@gmail.com
 
 ## 版權聲明
 
