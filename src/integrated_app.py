@@ -5,7 +5,8 @@
 Word與PDF轉換與合併應用程式 - 整合版
 功能：
 1. 將Word文件轉換為PDF格式
-2. 將多個Word或PDF文件合併為單一PDF檔案
+2. 將PDF文件轉換為Word格式
+3. 將多個Word或PDF文件合併為單一PDF檔案
 """
 
 import os
@@ -26,6 +27,7 @@ from PyQt5.QtGui import QFont, QDesktopServices, QIcon
 import docx2pdf
 from docx import Document
 import PyPDF2
+from pdf2docx import Converter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.pdfbase import pdfmetrics
@@ -221,6 +223,69 @@ def convert_word_to_pdf(word_path, pdf_path):
     
     print("所有轉換方法都失敗了")
     return False
+
+
+def convert_pdf_to_word(pdf_path, word_path):
+    """將PDF轉換為Word文件"""
+    try:
+        print(f"開始轉換: {pdf_path} -> {word_path}")
+        
+        # 使用pdf2docx進行轉換
+        cv = Converter(pdf_path)
+        cv.convert(word_path, start=0, end=None)
+        cv.close()
+        
+        # 檢查轉換結果
+        if os.path.exists(word_path) and os.path.getsize(word_path) > 0:
+            print("PDF轉Word成功!")
+            return True
+        else:
+            print("PDF轉Word失敗: 輸出檔案為空")
+            return False
+    except Exception as e:
+        print(f"PDF轉Word失敗: {str(e)}")
+        return False
+
+
+class PdfToWordThread(QThread):
+    """處理PDF轉Word的執行緒，避免UI凍結"""
+    progress_signal = pyqtSignal(int)
+    status_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str)
+    
+    def __init__(self, input_file, output_file):
+        super().__init__()
+        self.input_file = input_file
+        self.output_file = output_file
+        
+    def run(self):
+        try:
+            # 更新狀態
+            self.status_signal.emit("準備轉換...")
+            self.progress_signal.emit(10)
+            
+            # 開始轉換
+            self.status_signal.emit("轉換中...")
+            self.progress_signal.emit(30)
+            
+            # 執行轉換
+            success = convert_pdf_to_word(self.input_file, self.output_file)
+            
+            # 更新進度
+            self.progress_signal.emit(90)
+            
+            # 檢查結果
+            if success:
+                self.status_signal.emit("轉換完成!")
+                self.progress_signal.emit(100)
+                self.finished_signal.emit(self.output_file)
+            else:
+                self.status_signal.emit("轉換失敗!")
+                self.error_signal.emit("PDF轉Word失敗，請確認PDF檔案是否受保護或損壞。")
+        except Exception as e:
+            self.status_signal.emit("轉換出錯!")
+            self.error_signal.emit(str(e))
 
 
 class WordToPdfThread(QThread):
@@ -714,6 +779,207 @@ class WordToPdfTab(QWidget):
         else:
             QMessageBox.warning(self, '警告', '找不到輸出檔案')
 
+class PdfToWordTab(QWidget):
+    """PDF轉Word標籤頁"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.init_ui()
+        
+    def init_ui(self):
+        """初始化使用者界面"""
+        # 主佈局
+        main_layout = QVBoxLayout()
+        
+        # 檔案選擇區域
+        file_group = QGroupBox('檔案選擇')
+        file_layout = QVBoxLayout()
+        
+        input_layout = QHBoxLayout()
+        self.input_label = QLabel('PDF檔案:')
+        self.input_path = QTextEdit()
+        self.input_path.setReadOnly(True)
+        self.input_path.setMaximumHeight(60)
+        self.browse_btn = QPushButton('瀏覽...')
+        self.browse_btn.clicked.connect(self.browse_file)
+        
+        input_layout.addWidget(self.input_label)
+        input_layout.addWidget(self.input_path)
+        input_layout.addWidget(self.browse_btn)
+        
+        output_layout = QHBoxLayout()
+        self.output_label = QLabel('儲存位置:')
+        self.output_path = QTextEdit()
+        self.output_path.setReadOnly(True)
+        self.output_path.setMaximumHeight(60)
+        self.save_btn = QPushButton('選擇...')
+        self.save_btn.clicked.connect(self.save_file)
+        
+        output_layout.addWidget(self.output_label)
+        output_layout.addWidget(self.output_path)
+        output_layout.addWidget(self.save_btn)
+        
+        file_layout.addLayout(input_layout)
+        file_layout.addLayout(output_layout)
+        file_group.setLayout(file_layout)
+        
+        # 檔案資訊區域
+        info_group = QGroupBox('檔案資訊')
+        info_layout = QVBoxLayout()
+        self.file_info = QTextEdit()
+        self.file_info.setReadOnly(True)
+        info_layout.addWidget(self.file_info)
+        info_group.setLayout(info_layout)
+        
+        # 進度條區域
+        progress_layout = QVBoxLayout()
+        self.status_label = QLabel('轉換進度:')
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        progress_layout.addWidget(self.status_label)
+        progress_layout.addWidget(self.progress_bar)
+        
+        # 操作按鈕區域
+        button_layout = QHBoxLayout()
+        self.convert_btn = QPushButton('開始轉換')
+        self.convert_btn.clicked.connect(self.start_conversion)
+        self.convert_btn.setEnabled(False)
+        
+        self.open_btn = QPushButton('開啟檔案')
+        self.open_btn.clicked.connect(self.open_output_file)
+        self.open_btn.setEnabled(False)
+        
+        button_layout.addWidget(self.convert_btn)
+        button_layout.addWidget(self.open_btn)
+        
+        # 添加所有元件到主佈局
+        main_layout.addWidget(file_group)
+        main_layout.addWidget(info_group)
+        main_layout.addLayout(progress_layout)
+        main_layout.addLayout(button_layout)
+        
+        self.setLayout(main_layout)
+        
+        # 初始化變數
+        self.input_file = ''
+        self.output_file = ''
+        
+    def browse_file(self):
+        """選擇PDF檔案"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, '選擇PDF檔案', '', 'PDF檔案 (*.pdf)'
+        )
+        
+        if file_path:
+            self.input_file = file_path
+            self.input_path.setText(file_path)
+            
+            # 自動設定輸出檔案路徑
+            dir_name = os.path.dirname(file_path)
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            self.output_file = os.path.join(dir_name, f"{base_name}.docx")
+            self.output_path.setText(self.output_file)
+            
+            # 顯示檔案資訊
+            self.show_file_info(file_path)
+            
+            # 啟用轉換按鈕
+            self.convert_btn.setEnabled(True)
+    
+    def save_file(self):
+        """選擇Word儲存位置"""
+        if not self.input_file:
+            QMessageBox.warning(self, '警告', '請先選擇PDF檔案')
+            return
+            
+        base_name = os.path.splitext(os.path.basename(self.input_file))[0]
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, '儲存Word檔案', f"{base_name}.docx", 'Word檔案 (*.docx)'
+        )
+        
+        if file_path:
+            self.output_file = file_path
+            self.output_path.setText(file_path)
+    
+    def show_file_info(self, file_path):
+        """顯示PDF檔案資訊"""
+        try:
+            file_size = os.path.getsize(file_path) / 1024  # KB
+            
+            info = f"檔案名稱: {os.path.basename(file_path)}\n"
+            info += f"檔案大小: {file_size:.2f} KB\n"
+            
+            # 嘗試獲取PDF頁數
+            try:
+                with open(file_path, 'rb') as f:
+                    pdf = PyPDF2.PdfReader(f)
+                    info += f"頁數: {len(pdf.pages)}\n"
+            except:
+                info += "頁數: 無法讀取\n"
+            
+            self.file_info.setText(info)
+        except Exception as e:
+            self.file_info.setText(f"無法讀取檔案資訊: {str(e)}")
+    
+    def start_conversion(self):
+        """開始轉換PDF到Word"""
+        if not self.input_file or not self.output_file:
+            QMessageBox.warning(self, '警告', '請選擇輸入和輸出檔案')
+            return
+        
+        # 禁用按鈕，避免重複操作
+        self.convert_btn.setEnabled(False)
+        self.browse_btn.setEnabled(False)
+        self.save_btn.setEnabled(False)
+        
+        # 開始轉換執行緒
+        self.conversion_thread = PdfToWordThread(self.input_file, self.output_file)
+        self.conversion_thread.progress_signal.connect(self.update_progress)
+        self.conversion_thread.status_signal.connect(self.update_status)
+        self.conversion_thread.finished_signal.connect(self.conversion_finished)
+        self.conversion_thread.error_signal.connect(self.conversion_error)
+        self.conversion_thread.start()
+    
+    def update_progress(self, value):
+        """更新進度條"""
+        self.progress_bar.setValue(value)
+    
+    def update_status(self, status):
+        """更新狀態標籤"""
+        self.status_label.setText(status)
+    
+    def conversion_finished(self, output_file):
+        """轉換完成處理"""
+        self.status_label.setText('轉換完成!')
+        
+        # 重新啟用按鈕
+        self.convert_btn.setEnabled(True)
+        self.browse_btn.setEnabled(True)
+        self.save_btn.setEnabled(True)
+        self.open_btn.setEnabled(True)
+        
+        QMessageBox.information(
+            self, '完成', f'PDF檔案已成功轉換為Word!\n儲存於: {output_file}'
+        )
+    
+    def conversion_error(self, error_msg):
+        """轉換錯誤處理"""
+        self.status_label.setText('轉換失敗!')
+        self.progress_bar.setValue(0)
+        
+        # 重新啟用按鈕
+        self.convert_btn.setEnabled(True)
+        self.browse_btn.setEnabled(True)
+        self.save_btn.setEnabled(True)
+        
+        QMessageBox.critical(self, '錯誤', f'轉換過程中發生錯誤:\n{error_msg}')
+    
+    def open_output_file(self):
+        """開啟生成的Word檔案"""
+        if os.path.exists(self.output_file):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.output_file))
+        else:
+            QMessageBox.warning(self, '警告', '找不到輸出檔案')
 
 class PdfMergerTab(QWidget):
     """多文件合併PDF標籤頁"""
@@ -1129,6 +1395,10 @@ class IntegratedApp(QMainWindow):
         # 添加Word轉PDF標籤頁
         self.word_to_pdf_tab = WordToPdfTab()
         self.tabs.addTab(self.word_to_pdf_tab, 'Word轉PDF')
+        
+        # 添加PDF轉Word標籤頁
+        self.pdf_to_word_tab = PdfToWordTab()
+        self.tabs.addTab(self.pdf_to_word_tab, 'PDF轉Word')
         
         # 添加多文件合併PDF標籤頁
         self.pdf_merger_tab = PdfMergerTab()
