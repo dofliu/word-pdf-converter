@@ -21,18 +21,22 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QPushButton, QLabel,
                             QFileDialog, QProgressBar, QMessageBox, QVBoxLayout, 
                             QHBoxLayout, QWidget, QGroupBox, QListWidget, QCheckBox,
                             QComboBox, QSpinBox, QListWidgetItem, QAbstractItemView,
-                            QTabWidget, QTextEdit)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl
+                            QTabWidget, QTextEdit, QInputDialog, QLineEdit)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QMetaObject, pyqtSlot, Q_ARG, Q_RETURN_ARG
 from PyQt5.QtGui import QFont, QDesktopServices, QIcon
 import docx2pdf
 from docx import Document
-import PyPDF2
+import pypdf
+from pypdf.errors import FileNotDecryptedError, WrongPasswordError
 from pdf2docx import Converter
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib.units import cm  # 明確導入 cm 單位
+
+# --- 常數 ---
+USER_CANCELLED_PASSWORD = "USER_CANCELLED_MAGIC_STRING"
 
 # 根據不同作業系統設定字型
 def setup_fonts():
@@ -336,146 +340,147 @@ class MergePdfThread(QThread):
     finished_signal = pyqtSignal(str)
     error_signal = pyqtSignal(str)
     
-    def __init__(self, file_list, output_file, options):
+    def __init__(self, file_list, output_file, options, main_window):
         super().__init__()
         self.file_list = file_list
         self.output_file = output_file
         self.options = options
+        # 确保主窗口对象引用是线程安全的
+        self.main_window = main_window
         self.temp_dir = tempfile.mkdtemp()
         
+    def _prepare_pdf_reader(self, pdf_path):
+        """
+        健壯地打開一個PDF文件。如果文件已加密，它將循環提示用戶輸入密碼，
+        直到提供正確的密碼或用戶取消為止。
+        """
+        reader = pypdf.PdfReader(pdf_path)
+        if not reader.is_encrypted:
+            return reader
+
+        # 文件已加密，需要解密
+        filename = os.path.basename(pdf_path)
+        while True:
+            # 使用信号和槽机制安全地获取密码
+            self.main_window.password_requested.emit(filename)
+            password, ok = self.main_window.wait_for_password()
+            
+            if not ok:
+                password = USER_CANCELLED_PASSWORD
+
+            if password == USER_CANCELLED_PASSWORD:
+                raise Exception(f"已取消操作，因為未提供 '{filename}' 的密碼。")
+
+            try:
+                if reader.decrypt(password):
+                    return reader
+                else:
+                    self.main_window.wrong_password.emit(filename)
+            except Exception as e:
+                self.main_window.decrypt_error.emit(f"解密檔案 '{filename}' 時發生錯誤：{e}")
+                raise
+
     def run(self):
         try:
-            # 計算總步驟數
-            total_steps = len(self.file_list) + 3  # 轉換 + 合併 + 目錄 + 頁碼
+            total_files = len(self.file_list)
+            total_steps = total_files + 3  # 準備 + 目錄 + 合併 + 頁碼
             current_step = 0
+
+            # 步驟 1: 準備階段 - 轉換Word並解密所有PDF
+            self.status_signal.emit("準備檔案中...")
+            prepared_pdfs = [] # 儲存 {'reader': PdfReader物件, 'title': str}
             
-            # 步驟1: 將所有Word文件轉換為PDF
-            pdf_files = []
             for i, file_info in enumerate(self.file_list):
                 file_path = file_info['path']
                 file_name = os.path.basename(file_path)
-                
-                self.status_signal.emit(f"處理檔案 {i+1}/{len(self.file_list)}: {file_name}")
-                
-                # 檢查是否為Word文件
+                self.status_signal.emit(f"處理檔案 {i+1}/{total_files}: {file_name}")
+
+                pdf_to_open = None
                 if file_path.lower().endswith(('.docx', '.doc')):
-                    # 轉換為PDF
                     temp_pdf = os.path.join(self.temp_dir, f"temp_{i}.pdf")
-                    self.status_signal.emit(f"轉換Word檔案: {file_name}")
-                    
-                    # 使用改進的轉換函數
-                    success = convert_word_to_pdf(file_path, temp_pdf)
-                    
-                    if success and os.path.exists(temp_pdf) and os.path.getsize(temp_pdf) > 0:
-                        pdf_files.append({
-                            'path': temp_pdf,
-                            'title': file_info['title']
-                        })
-                    else:
-                        raise Exception(f"無法轉換 Word 檔案: {file_name}。請確認 Microsoft Word 已正確安裝且可以開啟此檔案。")
+                    if not convert_word_to_pdf(file_path, temp_pdf):
+                        raise Exception(f"無法轉換 Word 檔案: {file_name}。")
+                    pdf_to_open = temp_pdf
                 else:
-                    # 已經是PDF，直接添加
-                    pdf_files.append({
-                        'path': file_path,
-                        'title': file_info['title']
-                    })
+                    pdf_to_open = file_path
+                
+                reader = self._prepare_pdf_reader(pdf_to_open)
+                prepared_pdfs.append({'reader': reader, 'title': file_info['title']})
                 
                 current_step += 1
                 self.progress_signal.emit(int(current_step * 100 / total_steps))
-            
-            # 步驟2: 合併PDF文件
-            self.status_signal.emit("合併PDF檔案...")
-            
-            # 如果需要目錄，先創建目錄頁
-            toc_pdf = None
+
+            # 步驟 2: 建立目錄 (如果需要)
+            toc_pdf_path = None
             if self.options['generate_toc']:
-                toc_pdf = self.create_toc(pdf_files)
-            
-            # 合併所有PDF
-            merger = PyPDF2.PdfMerger()
-            
-            # 如果有目錄，先添加目錄
-            if toc_pdf:
-                merger.append(toc_pdf)
-            
-            # 添加所有PDF文件
-            for pdf_info in pdf_files:
-                merger.append(pdf_info['path'])
-            
-            # 暫時保存合併後的PDF
-            merged_pdf = os.path.join(self.temp_dir, "merged.pdf")
-            merger.write(merged_pdf)
-            merger.close()
-            
+                self.status_signal.emit("生成目錄...")
+                toc_pdf_path = self.create_toc(prepared_pdfs)
             current_step += 1
             self.progress_signal.emit(int(current_step * 100 / total_steps))
-            
-            # 步驟3: 如果需要添加頁碼
-            final_pdf = merged_pdf
+
+            # 步驟 3: 合併所有PDF
+            self.status_signal.emit("合併PDF檔案...")
+            merger = pypdf.PdfWriter()
+            if toc_pdf_path:
+                merger.append(toc_pdf_path)
+            for pdf_info in prepared_pdfs:
+                merger.append(fileobj=pdf_info['reader'])
+
+            merged_pdf_path = os.path.join(self.temp_dir, "merged.pdf")
+            merger.write(merged_pdf_path)
+            merger.close()
+            current_step += 1
+            self.progress_signal.emit(int(current_step * 100 / total_steps))
+
+            # 步驟 4: 添加頁碼 (如果需要)
+            final_pdf_path = merged_pdf_path
             if self.options['add_page_numbers']:
                 self.status_signal.emit("添加頁碼...")
-                final_pdf = self.add_page_numbers(merged_pdf)
-                
+                final_pdf_path = self.add_page_numbers(merged_pdf_path)
             current_step += 1
             self.progress_signal.emit(int(current_step * 100 / total_steps))
             
-            # 步驟4: 複製到最終輸出位置
-            shutil.copy2(final_pdf, self.output_file)
-            
-            current_step += 1
+            # 步驟 5: 完成
+            shutil.copy2(final_pdf_path, self.output_file)
             self.progress_signal.emit(100)
-            
             self.status_signal.emit("完成!")
             self.finished_signal.emit(self.output_file)
             
         except Exception as e:
             self.error_signal.emit(str(e))
         finally:
-            # 清理臨時文件
             try:
                 shutil.rmtree(self.temp_dir)
             except:
                 pass
     
-    def create_toc(self, pdf_files):
-        """創建目錄頁"""
+    def create_toc(self, prepared_pdfs):
+        """使用已解密的PdfReader物件創建目錄頁"""
         toc_pdf_path = os.path.join(self.temp_dir, "toc.pdf")
-        
-        # 使用reportlab創建目錄
         c = canvas.Canvas(toc_pdf_path, pagesize=A4)
         c.setFont(CHINESE_FONT, 24)
         c.drawString(4*cm, 27*cm, "目錄")
         
-        # 添加目錄項目
         y_position = 25*cm
         c.setFont(CHINESE_FONT, 12)
         
-        # 計算起始頁碼
-        start_page = 1  # 目錄頁本身
+        current_page_count = 1  # 目錄頁本身
         
-        for i, pdf_info in enumerate(pdf_files):
+        for i, pdf_info in enumerate(prepared_pdfs):
             title = pdf_info['title']
-            
-            # 檢查標題長度，過長則截斷
             if len(title) > 50:
                 title = title[:47] + "..."
                 
-            # 繪製標題和頁碼
             c.drawString(2*cm, y_position, f"{i+1}. {title}")
-            c.drawString(16*cm, y_position, f"{start_page + 1}")  # +1 因為目錄頁
+            c.drawString(16*cm, y_position, f"{current_page_count + 1}")
             
-            # 更新位置
             y_position -= 0.8*cm
-            
-            # 如果頁面空間不足，創建新頁
             if y_position < 2*cm:
                 c.showPage()
                 c.setFont(CHINESE_FONT, 12)
                 y_position = 27*cm
             
-            # 更新起始頁碼
-            reader = PyPDF2.PdfReader(pdf_info['path'])
-            start_page += len(reader.pages)
+            current_page_count += len(pdf_info['reader'].pages)
         
         c.save()
         return toc_pdf_path
@@ -483,52 +488,35 @@ class MergePdfThread(QThread):
     def add_page_numbers(self, pdf_path):
         """添加頁碼到PDF"""
         output_path = os.path.join(self.temp_dir, "with_page_numbers.pdf")
+        reader = pypdf.PdfReader(pdf_path)
+        writer = pypdf.PdfWriter()
         
-        # 讀取PDF
-        reader = PyPDF2.PdfReader(pdf_path)
-        writer = PyPDF2.PdfWriter()
-        
-        # 頁碼格式和位置
         page_format = self.options['page_number_format']
         start_number = self.options['start_page_number']
         
-        # 處理每一頁
         for i, page in enumerate(reader.pages):
-            # 獲取頁面尺寸
             page_width = float(page.mediabox.width)
             page_height = float(page.mediabox.height)
             
-            # 創建一個臨時的PDF來繪製頁碼
             packet = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
             c = canvas.Canvas(packet.name, pagesize=(page_width, page_height))
             c.setFont(CHINESE_FONT, 10)
             
-            # 格式化頁碼
             page_number = start_number + i
-            if page_format == "數字":
-                page_text = str(page_number)
-            elif page_format == "羅馬數字":
+            page_text = str(page_number)
+            if page_format == "羅馬數字":
                 page_text = self.to_roman(page_number)
-            else:  # 預設數字
-                page_text = str(page_number)
             
-            # 繪製頁碼在底部中央
             c.drawString(page_width/2 - 10, 20, page_text)
             c.save()
             
-            # 讀取臨時PDF
-            watermark = PyPDF2.PdfReader(packet.name)
-            watermark_page = watermark.pages[0]
-            
-            # 合併頁面和頁碼
-            page.merge_page(watermark_page)
+            watermark = pypdf.PdfReader(packet.name)
+            page.merge_page(watermark.pages[0])
             writer.add_page(page)
             
-            # 清理臨時文件
             packet.close()
             os.unlink(packet.name)
         
-        # 寫入結果
         with open(output_path, 'wb') as output_file:
             writer.write(output_file)
         
@@ -536,18 +524,8 @@ class MergePdfThread(QThread):
     
     def to_roman(self, num):
         """將數字轉換為羅馬數字"""
-        val = [
-            1000, 900, 500, 400,
-            100, 90, 50, 40,
-            10, 9, 5, 4,
-            1
-        ]
-        syms = [
-            "M", "CM", "D", "CD",
-            "C", "XC", "L", "XL",
-            "X", "IX", "V", "IV",
-            "I"
-        ]
+        val = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1]
+        syms = ["M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"]
         roman_num = ''
         i = 0
         while num > 0:
@@ -779,213 +757,13 @@ class WordToPdfTab(QWidget):
         else:
             QMessageBox.warning(self, '警告', '找不到輸出檔案')
 
-class PdfToWordTab(QWidget):
-    """PDF轉Word標籤頁"""
-    
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.init_ui()
-        
-    def init_ui(self):
-        """初始化使用者界面"""
-        # 主佈局
-        main_layout = QVBoxLayout()
-        
-        # 檔案選擇區域
-        file_group = QGroupBox('檔案選擇')
-        file_layout = QVBoxLayout()
-        
-        input_layout = QHBoxLayout()
-        self.input_label = QLabel('PDF檔案:')
-        self.input_path = QTextEdit()
-        self.input_path.setReadOnly(True)
-        self.input_path.setMaximumHeight(60)
-        self.browse_btn = QPushButton('瀏覽...')
-        self.browse_btn.clicked.connect(self.browse_file)
-        
-        input_layout.addWidget(self.input_label)
-        input_layout.addWidget(self.input_path)
-        input_layout.addWidget(self.browse_btn)
-        
-        output_layout = QHBoxLayout()
-        self.output_label = QLabel('儲存位置:')
-        self.output_path = QTextEdit()
-        self.output_path.setReadOnly(True)
-        self.output_path.setMaximumHeight(60)
-        self.save_btn = QPushButton('選擇...')
-        self.save_btn.clicked.connect(self.save_file)
-        
-        output_layout.addWidget(self.output_label)
-        output_layout.addWidget(self.output_path)
-        output_layout.addWidget(self.save_btn)
-        
-        file_layout.addLayout(input_layout)
-        file_layout.addLayout(output_layout)
-        file_group.setLayout(file_layout)
-        
-        # 檔案資訊區域
-        info_group = QGroupBox('檔案資訊')
-        info_layout = QVBoxLayout()
-        self.file_info = QTextEdit()
-        self.file_info.setReadOnly(True)
-        info_layout.addWidget(self.file_info)
-        info_group.setLayout(info_layout)
-        
-        # 進度條區域
-        progress_layout = QVBoxLayout()
-        self.status_label = QLabel('轉換進度:')
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-        progress_layout.addWidget(self.status_label)
-        progress_layout.addWidget(self.progress_bar)
-        
-        # 操作按鈕區域
-        button_layout = QHBoxLayout()
-        self.convert_btn = QPushButton('開始轉換')
-        self.convert_btn.clicked.connect(self.start_conversion)
-        self.convert_btn.setEnabled(False)
-        
-        self.open_btn = QPushButton('開啟檔案')
-        self.open_btn.clicked.connect(self.open_output_file)
-        self.open_btn.setEnabled(False)
-        
-        button_layout.addWidget(self.convert_btn)
-        button_layout.addWidget(self.open_btn)
-        
-        # 添加所有元件到主佈局
-        main_layout.addWidget(file_group)
-        main_layout.addWidget(info_group)
-        main_layout.addLayout(progress_layout)
-        main_layout.addLayout(button_layout)
-        
-        self.setLayout(main_layout)
-        
-        # 初始化變數
-        self.input_file = ''
-        self.output_file = ''
-        
-    def browse_file(self):
-        """選擇PDF檔案"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, '選擇PDF檔案', '', 'PDF檔案 (*.pdf)'
-        )
-        
-        if file_path:
-            self.input_file = file_path
-            self.input_path.setText(file_path)
-            
-            # 自動設定輸出檔案路徑
-            dir_name = os.path.dirname(file_path)
-            base_name = os.path.splitext(os.path.basename(file_path))[0]
-            self.output_file = os.path.join(dir_name, f"{base_name}.docx")
-            self.output_path.setText(self.output_file)
-            
-            # 顯示檔案資訊
-            self.show_file_info(file_path)
-            
-            # 啟用轉換按鈕
-            self.convert_btn.setEnabled(True)
-    
-    def save_file(self):
-        """選擇Word儲存位置"""
-        if not self.input_file:
-            QMessageBox.warning(self, '警告', '請先選擇PDF檔案')
-            return
-            
-        base_name = os.path.splitext(os.path.basename(self.input_file))[0]
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, '儲存Word檔案', f"{base_name}.docx", 'Word檔案 (*.docx)'
-        )
-        
-        if file_path:
-            self.output_file = file_path
-            self.output_path.setText(file_path)
-    
-    def show_file_info(self, file_path):
-        """顯示PDF檔案資訊"""
-        try:
-            file_size = os.path.getsize(file_path) / 1024  # KB
-            
-            info = f"檔案名稱: {os.path.basename(file_path)}\n"
-            info += f"檔案大小: {file_size:.2f} KB\n"
-            
-            # 嘗試獲取PDF頁數
-            try:
-                with open(file_path, 'rb') as f:
-                    pdf = PyPDF2.PdfReader(f)
-                    info += f"頁數: {len(pdf.pages)}\n"
-            except:
-                info += "頁數: 無法讀取\n"
-            
-            self.file_info.setText(info)
-        except Exception as e:
-            self.file_info.setText(f"無法讀取檔案資訊: {str(e)}")
-    
-    def start_conversion(self):
-        """開始轉換PDF到Word"""
-        if not self.input_file or not self.output_file:
-            QMessageBox.warning(self, '警告', '請選擇輸入和輸出檔案')
-            return
-        
-        # 禁用按鈕，避免重複操作
-        self.convert_btn.setEnabled(False)
-        self.browse_btn.setEnabled(False)
-        self.save_btn.setEnabled(False)
-        
-        # 開始轉換執行緒
-        self.conversion_thread = PdfToWordThread(self.input_file, self.output_file)
-        self.conversion_thread.progress_signal.connect(self.update_progress)
-        self.conversion_thread.status_signal.connect(self.update_status)
-        self.conversion_thread.finished_signal.connect(self.conversion_finished)
-        self.conversion_thread.error_signal.connect(self.conversion_error)
-        self.conversion_thread.start()
-    
-    def update_progress(self, value):
-        """更新進度條"""
-        self.progress_bar.setValue(value)
-    
-    def update_status(self, status):
-        """更新狀態標籤"""
-        self.status_label.setText(status)
-    
-    def conversion_finished(self, output_file):
-        """轉換完成處理"""
-        self.status_label.setText('轉換完成!')
-        
-        # 重新啟用按鈕
-        self.convert_btn.setEnabled(True)
-        self.browse_btn.setEnabled(True)
-        self.save_btn.setEnabled(True)
-        self.open_btn.setEnabled(True)
-        
-        QMessageBox.information(
-            self, '完成', f'PDF檔案已成功轉換為Word!\n儲存於: {output_file}'
-        )
-    
-    def conversion_error(self, error_msg):
-        """轉換錯誤處理"""
-        self.status_label.setText('轉換失敗!')
-        self.progress_bar.setValue(0)
-        
-        # 重新啟用按鈕
-        self.convert_btn.setEnabled(True)
-        self.browse_btn.setEnabled(True)
-        self.save_btn.setEnabled(True)
-        
-        QMessageBox.critical(self, '錯誤', f'轉換過程中發生錯誤:\n{error_msg}')
-    
-    def open_output_file(self):
-        """開啟生成的Word檔案"""
-        if os.path.exists(self.output_file):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(self.output_file))
-        else:
-            QMessageBox.warning(self, '警告', '找不到輸出檔案')
 
 class PdfMergerTab(QWidget):
     """多文件合併PDF標籤頁"""
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, main_window=None):
         super().__init__(parent)
+        self.main_window = main_window
         self.init_ui()
         
     def init_ui(self):
@@ -1134,7 +912,8 @@ class PdfMergerTab(QWidget):
                 })
                 
                 # 添加到UI列表
-                item = QListWidgetItem(f"{title} ({os.path.basename(file_path)})")
+                display_text = f"{title} ({os.path.basename(file_path)})"
+                item = QListWidgetItem(display_text)
                 self.file_list.addItem(item)
             
             # 如果有檔案且已選擇輸出路徑，啟用合併按鈕
@@ -1228,8 +1007,8 @@ class PdfMergerTab(QWidget):
         self.move_down_btn.setEnabled(False)
         self.output_btn.setEnabled(False)
         
-        # 開始合併執行緒
-        self.conversion_thread = MergePdfThread(self.files, self.output_file, options)
+        # 開始合併執行緒，並明確傳遞主視窗的參考
+        self.conversion_thread = MergePdfThread(self.files, self.output_file, options, self.main_window)
         self.conversion_thread.progress_signal.connect(self.update_progress)
         self.conversion_thread.status_signal.connect(self.update_status)
         self.conversion_thread.finished_signal.connect(self.merge_finished)
@@ -1304,7 +1083,7 @@ class AboutTab(QWidget):
         title_label.setAlignment(Qt.AlignCenter)
         
         # 版本
-        version_label = QLabel('版本: 1.1.0')
+        version_label = QLabel('版本: 1.4.0 (穩定版)')
         version_label.setAlignment(Qt.AlignCenter)
         
         # 說明
@@ -1321,6 +1100,7 @@ class AboutTab(QWidget):
         <h2>使用須知</h2>
         <ul>
             <li>使用Word轉PDF功能需要安裝Microsoft Word</li>
+            <li>合併加密的PDF檔案時，會提示輸入密碼</li>
             <li>合併大型文件可能需要較長時間</li>
             <li>支援繁體中文</li>
             <li>如果轉換失敗，請確認Word可以正常開啟該檔案</li>
@@ -1347,7 +1127,7 @@ class AboutTab(QWidget):
         <p>答：請確認以下事項：</p>
         <ul>
             <li>所有Word檔案都可以正常開啟</li>
-            <li>PDF檔案未被損壞</li>
+            <li>PDF檔案未被損壞或密碼正確</li>
             <li>有足夠的磁碟空間</li>
         </ul>
         """)
@@ -1393,23 +1173,39 @@ class IntegratedApp(QMainWindow):
         self.tabs = QTabWidget()
         
         # 添加Word轉PDF標籤頁
-        self.word_to_pdf_tab = WordToPdfTab()
+        self.word_to_pdf_tab = WordToPdfTab(parent=self)
         self.tabs.addTab(self.word_to_pdf_tab, 'Word轉PDF')
         
-        # 添加PDF轉Word標籤頁
-        self.pdf_to_word_tab = PdfToWordTab()
-        self.tabs.addTab(self.pdf_to_word_tab, 'PDF轉Word')
-        
-        # 添加多文件合併PDF標籤頁
-        self.pdf_merger_tab = PdfMergerTab()
+        # 添加多文件合併PDF標籤頁，並明確傳遞主視窗參考
+        self.pdf_merger_tab = PdfMergerTab(parent=self, main_window=self)
         self.tabs.addTab(self.pdf_merger_tab, '多文件合併PDF')
         
         # 添加關於標籤頁
-        self.about_tab = AboutTab()
+        self.about_tab = AboutTab(parent=self)
         self.tabs.addTab(self.about_tab, '關於')
         
         # 設定主視窗
         self.setCentralWidget(self.tabs)
+
+    # @pyqtSlot(str, result=str)
+    # def get_password(self, filename):
+    #     """彈出對話框讓使用者輸入密碼，並返回結果"""
+    #     print(f"get_password called for file: {filename}")  # 添加日誌記錄
+    #     password, ok = QInputDialog.getText(
+    #         self,
+    #         '需要密碼',
+    #         f'檔案 "{filename}" 已加密，請輸入密碼：',
+    #         QLineEdit.Password
+    #     )
+    #     if ok:
+    #         return password
+    #     return USER_CANCELLED_PASSWORD
+
+    # @pyqtSlot(str)
+    # def show_wrong_password_warning(self, filename):
+    #     """顯示密碼錯誤的警告框"""
+    #     print(f"show_wrong_password_warning called for file: {filename}")  # 添加日誌記錄
+    #     QMessageBox.warning(self, '密碼錯誤', f"檔案 '{filename}' 的密碼不正確，請重試。")
 
 
 if __name__ == '__main__':

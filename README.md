@@ -1,83 +1,112 @@
-# Word PDF 轉換與合併工具
+# Word與PDF轉換與合併應用程式使用說明
 
-這是一個功能完整的Word與PDF文件轉換工具，提供圖形化界面和豐富的功能選項。
+## 簡介
 
-## 主要功能
+本應用程式提供兩個主要功能：
+1. 將Word文件轉換為PDF格式
+2. 將多個Word或PDF文件合併為單一PDF檔案
 
-- **Word轉PDF**:
-  - 支援多種轉換方法 (docx2pdf, COM自動化, LibreOffice)
-  - 自動處理中文字型 (Windows/Linux/macOS)
-  - 轉換進度顯示
-
-- **PDF轉Word**:
-  - 使用pdf2docx進行高品質轉換
-  - 保留原始格式和內容
-
-- **多文件合併PDF**:
-  - 支援混合Word和PDF文件合併
-  - 自動生成目錄頁
-  - 添加頁碼功能
-  - 自訂頁碼格式
-
-- **圖形化界面**:
-  - 使用PyQt5開發的跨平台界面
-  - 進度條顯示轉換狀態
-  - 錯誤訊息提示
+應用程式採用圖形化界面(GUI)設計，支援繁體中文，並針對Windows環境進行優化。
 
 ## 系統需求
 
-- Python 3.7+
-- 必要套件:
-  - PyQt5
-  - python-docx
-  - pdf2docx
-  - docx2pdf
-  - PyPDF2
-  - reportlab
+- 作業系統：Windows 10或更新版本
+- Python 3.6或更新版本
+- 必要套件：PyQt5, python-docx, docx2pdf, PyPDF2, reportlab
 
-## 安裝方式
+## 安裝方法
 
-1. 克隆倉庫:
-```bash
-git clone https://github.com/dofliu/word-pdf-converter.git
-cd word-pdf-converter
-```
+### 方法一：使用安裝包（推薦）
 
-2. 安裝依賴套件:
-```bash
-pip install -r requirements.txt
-```
+1. 下載提供的安裝包 `Word_PDF_Converter_Setup.exe`
+2. 雙擊安裝包，依照指示完成安裝
+3. 從開始選單或桌面捷徑啟動應用程式
 
-## 使用方式
+### 方法二：從原始碼執行
 
-### 圖形化界面
-```bash
-python src/integrated_app.py
-```
+1. 確保已安裝Python 3.6或更新版本
+2. 安裝必要套件：
+   ```
+   pip install PyQt5 python-docx docx2pdf PyPDF2 reportlab
+   ```
+3. 解壓縮提供的原始碼壓縮包
+4. 執行啟動器：
+   ```
+   python src/launcher.py
+   ```
 
-### 命令列使用
-Word轉PDF:
-```bash
-python src/integrated_app.py --word input.docx --pdf output.pdf
-```
+## 功能說明
 
-PDF轉Word:
-```bash
-python src/integrated_app.py --pdf input.pdf --word output.docx
-```
+### 啟動器
 
-合併多個文件:
-```bash
-python src/integrated_app.py --merge file1.pdf file2.docx --output merged.pdf
-```
+啟動應用程式後，您將看到主啟動器界面，提供兩個選項：
+- **Word轉PDF**：將Word文件轉換為PDF格式
+- **多文件合併PDF**：將多個Word或PDF文件合併為單一PDF檔案
 
-## 授權資訊
+點擊對應按鈕即可啟動相應功能。
 
-本專案採用 MIT 授權條款。詳見 LICENSE 檔案。
+### Word轉PDF功能
 
-## 貢獻指南
+此功能可將Word文件(.docx, .doc)轉換為PDF格式，並保留原始格式、圖片與表格。
 
-歡迎提交 Pull Request。請確保:
-1. 遵循現有程式碼風格
-2. 包含適當的測試
-3. 更新相關文件
+#### 使用步驟：
+
+1. 點擊「瀏覽...」按鈕選擇要轉換的Word檔案
+2. 系統會自動顯示檔案資訊並設定預設的輸出路徑
+3. 如需更改輸出路徑，點擊「選擇...」按鈕
+4. 點擊「開始轉換」按鈕開始轉換過程
+5. 轉換完成後，可點擊「開啟檔案」按鈕直接查看生成的PDF
+
+#### 注意事項：
+
+- 轉換過程中會顯示進度條，但實際進度可能與顯示不完全同步
+- 轉換大型文件可能需要較長時間
+- 繁體中文字型已內建支援，無需額外設定
+
+### 多文件合併PDF功能
+
+此功能可將多個Word或PDF文件合併為單一PDF檔案，支援調整檔案順序、生成目錄與添加頁碼。
+
+#### 使用步驟：
+
+1. 點擊「添加檔案」按鈕選擇要合併的檔案（可多次添加）
+2. 使用「上移」、「下移」按鈕或直接拖放調整檔案順序
+3. 設定合併選項：
+   - 勾選「生成目錄」可在合併PDF開頭添加目錄頁
+   - 勾選「添加頁碼」可在每頁底部添加頁碼
+   - 可選擇頁碼格式（數字或羅馬數字）
+   - 可設定起始頁碼
+4. 點擊「選擇...」按鈕設定輸出檔案路徑
+5. 點擊「開始合併」按鈕開始合併過程
+6. 合併完成後，可點擊「開啟檔案」按鈕直接查看生成的PDF
+
+#### 注意事項：
+
+- 如果添加Word文件，系統會先自動將其轉換為PDF再進行合併
+- 合併大量或大型文件可能需要較長時間
+- 目錄頁會使用檔案名稱作為標題
+- 頁碼預設添加在頁面底部中央位置
+
+## 常見問題
+
+### Q: 轉換後的PDF中文字顯示亂碼或缺字？
+A: 請確保系統已安裝中文字型。本應用程式已內建支援繁體中文，但某些特殊字型可能需要額外安裝。
+
+### Q: 轉換後的PDF格式與原Word不符？
+A: 某些複雜的Word格式可能無法完全保留。建議在轉換後檢查重要文件的格式。
+
+### Q: 合併PDF時出現錯誤？
+A: 請確保所有檔案都可正常開啟，且沒有被其他程式鎖定。如果問題持續，可嘗試重新啟動應用程式。
+
+### Q: 應用程式啟動失敗？
+A: 請確保已安裝所有必要套件，並使用兼容的Python版本。
+
+## 技術支援
+
+如有任何問題或建議，請聯繫技術支援：
+- 電子郵件：moredof@gmail.com
+
+## 版權聲明
+
+© 2025 Word與PDF轉換工具
+本應用程式僅供個人或教育用途使用。
