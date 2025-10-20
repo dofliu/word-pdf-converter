@@ -22,7 +22,8 @@ ENV/
 # Windows specific
 Thumbs.db
 desktop.ini
-
+merged_evaluation.csv
+csvMerge.py
 # macOS specific
 .DS_Store
 
